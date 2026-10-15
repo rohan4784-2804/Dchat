@@ -2,7 +2,7 @@
   "name": "dchat-server",
   "version": "1.0.0",
   "private": true,
-  "description": "DChat real-time messaging backend for Render",
+  "description": "DChat real-time messaging backend for Render using local JSON storage",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -16,7 +16,6 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
-    "mongodb": "^6.12.0",
     "socket.io": "^4.8.1"
   }
 }
