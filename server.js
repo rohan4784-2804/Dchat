@@ -77,6 +77,27 @@ function publicUser(user) {
   return { username: user.username, createdAt: user.createdAt };
 }
 
+function usersFor(username) {
+  const currentUsername = String(username || "").toLowerCase();
+  return users
+    .filter((user) => user.username.toLowerCase() !== currentUsername)
+    .map((user) => ({
+      ...publicUser(user),
+      online: (onlineUsers.get(user.username) || 0) > 0
+    }));
+}
+
+// Send each connected chat app its own current user list.
+// This lets every client refresh automatically without pressing the button.
+function broadcastUserLists() {
+  for (const socket of io.sockets.sockets.values()) {
+    socket.emit("users:update", {
+      ok: true,
+      users: usersFor(socket.user?.username)
+    });
+  }
+}
+
 function makeToken(username) {
   return jwt.sign({ username }, JWT_SECRET, { expiresIn: "30d" });
 }
@@ -122,6 +143,7 @@ app.post("/api/register", async (req, res) => {
     };
     users.push(user);
     await persistData();
+    broadcastUserLists();
 
     return res.status(201).json({
       ok: true,
@@ -156,16 +178,8 @@ app.get("/api/me", requireAuth, (req, res) => {
 });
 
 app.get("/api/users", requireAuth, (req, res) => {
-  const currentUsername = String(req.user?.username || "").toLowerCase();
-  const list = users
-    .filter((user) => user.username.toLowerCase() !== currentUsername)
-    .map((user) => ({
-      ...publicUser(user),
-      online: (onlineUsers.get(user.username) || 0) > 0
-    }));
-
   // Keep the response contract consistent with the Flutter client.
-  res.status(200).json({ ok: true, users: list });
+  res.status(200).json({ ok: true, users: usersFor(req.user?.username) });
 });
 
 app.get("/api/messages/:username", requireAuth, (req, res) => {
@@ -194,6 +208,7 @@ io.on("connection", (socket) => {
   socket.join(`user:${username}`);
   onlineUsers.set(username, (onlineUsers.get(username) || 0) + 1);
   io.emit("presence:update", { username, online: true });
+  broadcastUserLists();
 
   socket.on("message:send", async (payload, acknowledge) => {
     try {
@@ -237,6 +252,7 @@ io.on("connection", (socket) => {
     } else {
       onlineUsers.set(username, count);
     }
+    broadcastUserLists();
   });
 });
 
