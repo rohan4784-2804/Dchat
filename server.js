@@ -212,11 +212,35 @@ io.on("connection", (socket) => {
 
   socket.on("message:send", async (payload, acknowledge) => {
     try {
-      const toInput = String(payload?.to || payload?.recipient || "").trim();
+      // Accept recipient usernames from different client versions, including
+      // clients that pass the selected user object instead of a plain string.
+      const recipientValue =
+        payload?.to ??
+        payload?.recipient ??
+        payload?.recipientUsername ??
+        payload?.receiverUsername ??
+        payload?.targetUsername ??
+        payload?.receiver;
+
+      const toInput = typeof recipientValue === "string"
+        ? recipientValue.trim()
+        : String(
+            recipientValue?.username ??
+            recipientValue?.user?.username ??
+            recipientValue?.recipientUsername ??
+            recipientValue?.name ??
+            ""
+          ).trim();
+
       const recipient = findUser(toInput);
-      const body = String(payload?.text || "").trim();
+      const body = String(payload?.text ?? payload?.message ?? payload?.body ?? "").trim();
 
       if (!recipient || recipient.username.toLowerCase() === username.toLowerCase()) {
+        console.warn("Rejected message recipient:", {
+          from: username,
+          requestedRecipient: toInput || "(missing)",
+          knownUsers: users.map((user) => user.username)
+        });
         if (typeof acknowledge === "function") acknowledge({ ok: false, error: "Choose a valid recipient." });
         return;
       }
