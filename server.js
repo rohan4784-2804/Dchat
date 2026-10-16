@@ -155,11 +155,17 @@ app.get("/api/me", requireAuth, (req, res) => {
   res.json({ user: publicUser(user) });
 });
 
-app.get("/api/users", requireAuth, (_req, res) => {
-  res.json(users.map((u) => ({
-    ...publicUser(u),
-    online: (onlineUsers.get(u.username) || 0) > 0
-  })).filter((u) => u.username !== _req.user.username));
+app.get("/api/users", requireAuth, (req, res) => {
+  const currentUsername = String(req.user?.username || "").toLowerCase();
+  const list = users
+    .filter((user) => user.username.toLowerCase() !== currentUsername)
+    .map((user) => ({
+      ...publicUser(user),
+      online: (onlineUsers.get(user.username) || 0) > 0
+    }));
+
+  // Keep the response contract consistent with the Flutter client.
+  res.status(200).json({ ok: true, users: list });
 });
 
 app.get("/api/messages/:username", requireAuth, (req, res) => {
@@ -169,7 +175,7 @@ app.get("/api/messages/:username", requireAuth, (req, res) => {
     (m.from === req.user.username && m.to.toLowerCase() === other.toLowerCase()) ||
     (m.to.toLowerCase() === req.user.username.toLowerCase() && m.from.toLowerCase() === other.toLowerCase())
   );
-  res.json(conversation.slice(-2000));
+  res.status(200).json({ ok: true, messages: conversation.slice(-2000) });
 });
 
 io.use((socket, next) => {
