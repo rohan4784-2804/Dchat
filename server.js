@@ -9,6 +9,7 @@ const { randomUUID } = require("crypto");
 const fs = require("fs/promises");
 const path = require("path");
 const { Server } = require("socket.io");
+const admin = require("firebase-admin");
 
 const app = express();
 const server = http.createServer(app);
@@ -45,6 +46,25 @@ const io = new Server(server, {
 });
 
 const onlineUsers = new Map();
+let firebaseMessagingReady = false;
+
+// Set FIREBASE_SERVICE_ACCOUNT_JSON in Render to the JSON contents of a
+// Firebase service-account key. Never commit this credential to GitHub.
+if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+  try {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+    firebaseMessagingReady = true;
+    console.log("Firebase Cloud Messaging is configured.");
+  } catch (error) {
+    console.error("Firebase initialization failed. Check FIREBASE_SERVICE_ACCOUNT_JSON:", error.message);
+  }
+} else {
+  console.warn("Firebase push notifications are disabled: FIREBASE_SERVICE_ACCOUNT_JSON is not set.");
+}
+
 let users = [];
 let messages = [];
 let writeQueue = Promise.resolve();
@@ -171,6 +191,97 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
+// Register the signed-in user's Android FCM token for push notifications.
+app.post("/api/push-token", requireAuth, async (req, res) => {
+  try {
+    const token = String(req.body?.token || "").trim();
+    if (!token || token.length > 4096) {
+      return res.status(400).json({ ok: false, error: "A valid FCM token is required." });
+    }
+    const user = findUser(req.user.username);
+    if (!user) return res.status(404).json({ ok: false, error: "Account not found." });
+    if (!Array.isArray(user.fcmTokens)) user.fcmTokens = [];
+    user.fcmTokens = user.fcmTokens.filter((entry) => entry !== token);
+    user.fcmTokens.push(token);
+    // Keep only the most recent five devices per account.
+    user.fcmTokens = user.fcmTokens.slice(-5);
+    await persistData();
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error("Register push token error:", error);
+    return res.status(500).json({ ok: false, error: "Could not register push token." });
+  }
+});
+
+app.delete("/api/push-token", requireAuth, async (req, res) => {
+  try {
+    const token = String(req.body?.token || "").trim();
+    const user = findUser(req.user.username);
+    if (!user) return res.status(404).json({ ok: false, error: "Account not found." });
+    if (Array.isArray(user.fcmTokens)) {
+      user.fcmTokens = user.fcmTokens.filter((entry) => entry !== token);
+      await persistData();
+    }
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error("Remove push token error:", error);
+    return res.status(500).json({ ok: false, error: "Could not remove push token." });
+  }
+});
+
+async function sendPushNotification(recipient, message) {
+  if (!firebaseMessagingReady || !Array.isArray(recipient.fcmTokens) || recipient.fcmTokens.length === 0) {
+    return;
+  }
+
+  // FCM notification payloads are shown by Android when the app is in the
+  // background or terminated. Data fields allow the app to open the right chat.
+  const tokens = [...new Set(recipient.fcmTokens)].slice(0, 500);
+  try {
+    const result = await admin.messaging().sendEachForMulticast({
+      tokens,
+      notification: {
+        title: message.from,
+        body: message.text.length > 180 ? message.text.slice(0, 177) + "..." : message.text
+      },
+      data: {
+        type: "chat",
+        sender: message.from,
+        recipient: message.to,
+        messageId: message.id
+      },
+      android: {
+        priority: "high",
+        notification: {
+          channelId: "dchat_messages",
+          sound: "default"
+        }
+      }
+    });
+
+    const invalidTokens = [];
+    result.responses.forEach((response, index) => {
+      if (!response.success) {
+        const code = response.error?.code || "";
+        if (code.includes("registration-token-not-registered") ||
+            code.includes("invalid-registration-token")) {
+          invalidTokens.push(tokens[index]);
+        } else {
+          console.warn("FCM delivery error:", code || response.error?.message || "unknown error");
+        }
+      }
+    });
+
+    if (invalidTokens.length) {
+      recipient.fcmTokens = recipient.fcmTokens.filter((token) => !invalidTokens.includes(token));
+      await persistData();
+    }
+  } catch (error) {
+    // A push failure must not prevent the chat message from being saved/delivered.
+    console.error("FCM send failed:", error.message);
+  }
+}
+
 app.get("/api/me", requireAuth, (req, res) => {
   const user = findUser(req.user.username);
   if (!user) return res.status(404).json({ error: "Account not found." });
@@ -258,6 +369,7 @@ io.on("connection", (socket) => {
       };
       messages.push(message);
       await persistData();
+      await sendPushNotification(recipient, message);
 
       io.to(`user:${username}`).emit("message:new", message);
       io.to(`user:${recipient.username}`).emit("message:new", message);
