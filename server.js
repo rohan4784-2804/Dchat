@@ -6,8 +6,6 @@ const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { randomUUID } = require("crypto");
-const fs = require("fs/promises");
-const path = require("path");
 const { Server } = require("socket.io");
 const admin = require("firebase-admin");
 
@@ -15,7 +13,13 @@ const app = express();
 const server = http.createServer(app);
 const PORT = Number(process.env.PORT || 3000);
 const JWT_SECRET = process.env.JWT_SECRET;
-const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, "dchat-data.json");
+const MONGODB_URI = process.env.MONGODB_URI;
+const MONGODB_DB_NAME = process.env.MONGODB_DB_NAME || "dchat";
+const { MongoClient } = require("mongodb");
+const mongoClient = new MongoClient(MONGODB_URI || "mongodb://127.0.0.1:27017");
+let db;
+let usersCollection;
+let messagesCollection;
 
 if (!JWT_SECRET || JWT_SECRET.length < 32) {
   console.error("Set JWT_SECRET to a random secret of at least 32 characters in Render environment variables.");
@@ -70,25 +74,28 @@ let messages = [];
 let writeQueue = Promise.resolve();
 
 async function loadData() {
-  try {
-    const raw = await fs.readFile(DATA_FILE, "utf8");
-    const data = JSON.parse(raw);
-    users = Array.isArray(data.users) ? data.users : [];
-    messages = Array.isArray(data.messages) ? data.messages : [];
-    console.log(`Loaded ${users.length} users and ${messages.length} messages from local JSON storage.`);
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-    await persistData();
-    console.log("Created a new local JSON data file.");
+  if (!MONGODB_URI) {
+    throw new Error("MONGODB_URI is missing. Add your MongoDB Atlas connection string in Render Environment settings.");
   }
+  await mongoClient.connect();
+  db = mongoClient.db(MONGODB_DB_NAME);
+  usersCollection = db.collection("users");
+  messagesCollection = db.collection("messages");
+
+  users = await usersCollection.find({}, { projection: { _id: 0 } }).toArray();
+  messages = await messagesCollection.find({}, { projection: { _id: 0 } }).sort({ createdAt: 1 }).toArray();
+  console.log(`Connected to MongoDB Atlas database "${MONGODB_DB_NAME}". Loaded ${users.length} users and ${messages.length} messages.`);
 }
 
+// Persist cached records to Atlas. The queue prevents overlapping full snapshots.
 function persistData() {
-  const snapshot = JSON.stringify({ users, messages }, null, 2);
+  const usersSnapshot = users.map((user) => ({ ...user }));
+  const messagesSnapshot = messages.map((message) => ({ ...message }));
   writeQueue = writeQueue.then(async () => {
-    const tempFile = DATA_FILE + ".tmp";
-    await fs.writeFile(tempFile, snapshot, "utf8");
-    await fs.rename(tempFile, DATA_FILE);
+    await usersCollection.deleteMany({});
+    if (usersSnapshot.length) await usersCollection.insertMany(usersSnapshot);
+    await messagesCollection.deleteMany({});
+    if (messagesSnapshot.length) await messagesCollection.insertMany(messagesSnapshot);
   });
   return writeQueue;
 }
@@ -143,7 +150,7 @@ app.get("/", (_req, res) => {
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "DChat Server", storage: "local-json" });
+  res.json({ ok: true, service: "DChat Server", storage: "mongodb-atlas", database: MONGODB_DB_NAME });
 });
 
 app.post("/api/register", async (req, res) => {
@@ -403,6 +410,6 @@ loadData()
     server.listen(PORT, "0.0.0.0", () => console.log(`DChat server listening on port ${PORT}`));
   })
   .catch((error) => {
-    console.error("Could not load local JSON data:", error);
+    console.error("Could not connect to MongoDB Atlas or load data:", error.message);
     process.exit(1);
   });
